@@ -1,4 +1,4 @@
-"""选股中心 Tab。"""
+"""选股中心。"""
 from typing import Dict, Optional
 
 import pandas as pd
@@ -6,18 +6,19 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QComboBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, QFormLayout,
     QGroupBox, QDoubleSpinBox, QSpinBox, QCheckBox, QMessageBox, QFileDialog,
+    QLineEdit, QProgressBar,
 )
 from PySide6.QtCore import QThread, Signal, Qt
 
 from ...data.fetcher import DataFetcher
 from ...indicators.technical import enrich
-from ...screener.engine import RuleRegistry, run_rule, results_to_dataframe
+from ...screener.engine import RuleRegistry, run_rule
 from ...logger import log
 
 
 class _ScreenThread(QThread):
-    progress = Signal(int, int, str)   # (idx, total, code)
-    finished_ok = Signal(object)       # List[RuleResult]
+    progress = Signal(int, int, str)
+    finished_ok = Signal(object)
     failed = Signal(str)
 
     def __init__(self, fetcher: DataFetcher, rule_key: str,
@@ -30,17 +31,20 @@ class _ScreenThread(QThread):
 
     def run(self):
         try:
-            # 取股票列表
             df_list = self.fetcher.get_local_stock_list()
             if df_list.empty:
-                self.failed.emit("请先在『数据中心』更新股票列表")
+                self.failed.emit("请先在『数据中心』更新股票列表和日线数据")
                 return
 
             codes = df_list["code"].tolist()
             names = dict(zip(df_list["code"], df_list["name"]))
             results = []
             total = len(codes)
+
             for i, code in enumerate(codes):
+                if self.isInterruptionRequested():
+                    self.finished_ok.emit(results[:self.top_n])
+                    return
                 kline = self.fetcher.get_local_daily(code)
                 if kline.empty or len(kline) < 25:
                     continue
@@ -53,113 +57,182 @@ class _ScreenThread(QThread):
                     self.progress.emit(i + 1, total, code)
 
             results.sort(key=lambda x: x.score, reverse=True)
-            self.progress.emit(total, total, "done")
-            self.finished_ok.emit(results[: self.top_n])
+            self.progress.emit(total, total, "完成")
+            self.finished_ok.emit(results[:self.top_n])
         except Exception as e:
             self.failed.emit(str(e))
 
 
 class ScreenerWidget(QWidget):
-    """选股中心界面。"""
-
-    code_clicked = Signal(str)  # 发射到行情中心
+    code_clicked = Signal(str)
 
     def __init__(self, fetcher: DataFetcher, parent=None):
         super().__init__(parent)
         self.fetcher = fetcher
         self._thread: Optional[_ScreenThread] = None
+        self._last_results = []
         self._build_ui()
 
-    # ==================== UI ====================
     def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(12)
+
         splitter = QSplitter(Qt.Horizontal)
-        # 左侧：规则 + 参数
+
+        # ========== 左侧：规则与参数 ==========
         left = QWidget()
         lv = QVBoxLayout(left)
-        lv.setContentsMargins(6, 6, 6, 6)
+        lv.setContentsMargins(0, 0, 0, 0)
+        lv.setSpacing(10)
 
+        # 规则选择
         rule_box = QGroupBox("选股规则")
         rl = QVBoxLayout(rule_box)
+        rl.setContentsMargins(12, 18, 12, 12)
+        rl.setSpacing(8)
+
         self.rule_combo = QComboBox()
+        self.rule_combo.setFixedHeight(32)
+        rule_name_map = {
+            "consolidation_breakout": "核心策略",
+            "ma_cross": "均线金叉",
+            "macd_golden": "MACD金叉",
+            "new_high_breakout": "新高突破",
+            "limit_up": "涨停检测",
+        }
         for k in RuleRegistry.all_keys():
             meta = RuleRegistry.get_meta(k)
-            self.rule_combo.addItem(f"{k} — {meta.get('desc','')}", k)
+            name = rule_name_map.get(k, k)
+            self.rule_combo.addItem(f"{name}  —  {meta.get('desc', '')}", k)
         self.rule_combo.currentIndexChanged.connect(self._on_rule_changed)
         rl.addWidget(self.rule_combo)
+        lv.addWidget(rule_box)
 
-        self.param_box = QGroupBox("参数")
-        self.param_form = QFormLayout(self.param_box)
-        rl.addWidget(self.param_box)
+        # 参数
+        param_box = QGroupBox("参数")
+        pl = QVBoxLayout(param_box)
+        pl.setContentsMargins(12, 18, 12, 12)
+        pl.setSpacing(6)
 
+        self.param_form = QFormLayout()
+        self.param_form.setSpacing(8)
         self.top_spin = QSpinBox()
         self.top_spin.setRange(10, 500)
         self.top_spin.setValue(50)
-        self.param_form.addRow("返回 Top N", self.top_spin)
+        self.top_spin.setFixedHeight(30)
+        self.param_form.addRow("返回数量", self.top_spin)
+        pl.addLayout(self.param_form)
+        lv.addWidget(param_box)
 
+        # 运行按钮
         self.btn_run = QPushButton("▶ 运行选股")
+        self.btn_run.setObjectName("primaryButton")
+        self.btn_run.setFixedHeight(44)
         self.btn_run.clicked.connect(self._on_run)
-        rl.addWidget(self.btn_run)
+        lv.addWidget(self.btn_run)
 
-        self.btn_export = QPushButton("导出 CSV")
+        self.btn_cancel = QPushButton("⏹ 取消")
+        self.btn_cancel.setFixedHeight(36)
+        self.btn_cancel.setEnabled(False)
+        self.btn_cancel.clicked.connect(self._on_cancel)
+        lv.addWidget(self.btn_cancel)
+
+        self.btn_export = QPushButton("📤 导出 CSV")
+        self.btn_export.setFixedHeight(36)
         self.btn_export.clicked.connect(self._on_export)
-        rl.addWidget(self.btn_export)
+        lv.addWidget(self.btn_export)
 
-        lv.addWidget(rule_box)
         lv.addStretch(1)
-
         splitter.addWidget(left)
 
-        # 右侧：结果表
+        # ========== 右侧：结果 ==========
         right = QWidget()
         rv = QVBoxLayout(right)
-        self.lbl_status = QLabel("就绪")
-        rv.addWidget(self.lbl_status)
+        rv.setContentsMargins(0, 0, 0, 0)
+        rv.setSpacing(8)
+
+        self.lbl_result_status = QLabel("请选择规则后点击「运行选股」")
+        self.lbl_result_status.setStyleSheet("color: #8b949e; font-weight: bold; padding: 4px;")
+        rv.addWidget(self.lbl_result_status)
+
+        # 进度条
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFixedHeight(20)
+        self.progress_bar.setFormat("就绪")
+        rv.addWidget(self.progress_bar)
+
+        # 结果表
+        result_box = QGroupBox("选股结果")
+        rbox_layout = QVBoxLayout(result_box)
+        rbox_layout.setContentsMargins(8, 18, 8, 8)
 
         self.table = QTableWidget(0, 0)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setStretchLastSection(True)
         self.table.doubleClicked.connect(self._on_row_double_clicked)
-        rv.addWidget(self.table, stretch=1)
+        rbox_layout.addWidget(self.table)
+
+        rv.addWidget(result_box, stretch=1)
 
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 4)
+        splitter.setStretchFactor(1, 3)
 
-        root = QVBoxLayout(self)
-        root.addWidget(splitter)
-
+        root.addWidget(splitter, stretch=1)
         self._on_rule_changed(0)
-        self._last_df = pd.DataFrame()
 
     def _on_rule_changed(self, _idx):
-        # 动态生成参数输入控件
+        # 清除旧参数行
         while self.param_form.rowCount() > 1:
             self.param_form.removeRow(1)
 
         rule_key = self.rule_combo.currentData()
         meta = RuleRegistry.get_meta(rule_key)
         params = meta.get("params", {})
+        param_names = {
+            "consolidation_days": "横盘天数",
+            "consolidation_range_pct": "横盘振幅(%)",
+            "shrink_vol_ratio": "缩量比",
+            "today_min_pct": "最小涨幅(%)",
+            "today_max_pct": "最大涨幅(%)",
+            "vol_expansion_ratio": "量能放大倍数",
+            "price_above_ma20": "价格站上MA20",
+            "short": "短期均线",
+            "long": "长期均线",
+            "n_days": "突破天数",
+            "vol_ratio": "量比阈值",
+        }
 
         self._param_inputs = {}
         for k, v in params.items():
+            label = param_names.get(k, k)
             if isinstance(v, bool):
                 cb = QCheckBox()
                 cb.setChecked(v)
-                self.param_form.addRow(k, cb)
+                self.param_form.addRow(label, cb)
                 self._param_inputs[k] = cb
             elif isinstance(v, int):
                 sp = QSpinBox()
-                sp.setRange(-1000000, 1000000)
+                sp.setRange(-10000, 10000)
                 sp.setValue(int(v))
-                self.param_form.addRow(k, sp)
+                sp.setFixedHeight(28)
+                self.param_form.addRow(label, sp)
                 self._param_inputs[k] = sp
             else:
                 ds = QDoubleSpinBox()
-                ds.setRange(-100000.0, 100000.0)
+                ds.setRange(-10000.0, 10000.0)
                 ds.setDecimals(3)
                 ds.setValue(float(v))
-                self.param_form.addRow(k, ds)
+                ds.setFixedHeight(28)
+                self.param_form.addRow(label, ds)
                 self._param_inputs[k] = ds
 
     def _collect_params(self) -> Dict:
@@ -175,91 +248,121 @@ class ScreenerWidget(QWidget):
 
     def _on_run(self):
         if self._thread is not None and self._thread.isRunning():
-            QMessageBox.information(self, "提示", "已有任务正在运行")
             return
 
         rule_key = self.rule_combo.currentData()
         params = self._collect_params()
-        params["code"] = ""
         top_n = self.top_spin.value()
 
         self.btn_run.setEnabled(False)
-        self.lbl_status.setText("运行中...")
+        self.btn_cancel.setEnabled(True)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("启动中...")
+        self.lbl_result_status.setText(f"⏳ 正在运行: {rule_key}")
+        self.lbl_result_status.setStyleSheet("color: #f0883e; font-weight: bold; padding: 4px;")
 
         self._thread = _ScreenThread(self.fetcher, rule_key, params, top_n)
         self._thread.progress.connect(self._on_progress)
         self._thread.finished_ok.connect(self._on_done)
         self._thread.failed.connect(self._on_failed)
-        self._thread.finished.connect(lambda: self.btn_run.setEnabled(True))
         self._thread.start()
 
+    def _on_cancel(self):
+        if self._thread and self._thread.isRunning():
+            self._thread.requestInterruption()
+            self.btn_cancel.setEnabled(False)
+            self.lbl_result_status.setText("⏹ 正在取消...")
+
     def _on_progress(self, idx, total, code):
-        pct = int((idx / total) * 100) if total > 0 else 0
-        self.lbl_status.setText(f"运行中 {idx}/{total} ({pct}%) — {code}")
+        if total > 0:
+            pct = int(idx / total * 100)
+            self.progress_bar.setValue(pct)
+            self.progress_bar.setFormat(f"{idx}/{total} ({pct}%) - {code}")
+            self.lbl_result_status.setText(f"⏳ 扫描中: {idx}/{total} - {code}")
 
     def _on_done(self, results):
-        df = results_to_dataframe(results) if results else pd.DataFrame()
-        self._last_df = df
-        self._render_table(df)
-        self.lbl_status.setText(f"完成，命中 {len(df)} 只")
+        self.btn_run.setEnabled(True)
+        self.btn_cancel.setEnabled(False)
+        self._last_results = results
 
-    def _on_failed(self, err: str):
-        self.lbl_status.setText("失败")
-        QMessageBox.critical(self, "错误", err)
-        log.error("选股失败: %s", err)
-
-    def _render_table(self, df: pd.DataFrame):
-        self.table.clear()
-        if df.empty:
+        if not results:
+            self.progress_bar.setValue(100)
+            self.progress_bar.setFormat("完成")
+            self.lbl_result_status.setText("⚠️ 没有符合条件的股票")
+            self.lbl_result_status.setStyleSheet("color: #d29922; font-weight: bold; padding: 4px;")
+            self.table.clear()
             self.table.setRowCount(0)
             self.table.setColumnCount(0)
             return
-        columns = list(df.columns)
+
+        self.progress_bar.setValue(100)
+        self.progress_bar.setFormat("完成")
+        self.lbl_result_status.setText(f"✅ 命中 {len(results)} 只股票，按评分降序")
+        self.lbl_result_status.setStyleSheet("color: #3fb950; font-weight: bold; padding: 4px;")
+
+        columns = ["代码", "名称", "评分", "原因", "价格", "涨幅%"]
+        self.table.clear()
         self.table.setColumnCount(len(columns))
         self.table.setHorizontalHeaderLabels(columns)
-        self.table.setRowCount(len(df))
-        for r in range(len(df)):
-            for c, col in enumerate(columns):
-                val = df.iloc[r][col]
-                if isinstance(val, float):
-                    text = f"{val:.2f}"
-                else:
-                    text = str(val)
-                item = QTableWidgetItem(text)
-                if col == "code":
-                    item.setData(Qt.UserRole, str(df.iloc[r][col]))
-                self.table.setItem(r, c, item)
+        self.table.setRowCount(len(results))
+
+        for r, res in enumerate(results):
+            item_code = QTableWidgetItem(str(getattr(res, "code", "")))
+            item_name = QTableWidgetItem(str(getattr(res, "name", "")))
+            item_score = QTableWidgetItem(f"{getattr(res, 'score', 0):.2f}")
+            item_reason = QTableWidgetItem(", ".join(getattr(res, "reasons", [])[:3]))
+            price = getattr(res, "extra", {}).get("price")
+            pct = getattr(res, "extra", {}).get("change_pct")
+            item_price = QTableWidgetItem(f"{float(price):.2f}" if price else "-")
+            item_pct = QTableWidgetItem(f"{float(pct):+.2f}%" if pct is not None else "-")
+
+            for item in [item_code, item_name, item_score, item_reason, item_price, item_pct]:
+                item.setTextAlignment(Qt.AlignCenter)
+
+            # 涨跌幅颜色
+            if pct is not None and float(pct) > 0:
+                item_pct.setForeground(Qt.GlobalColor.red)
+
+            self.table.setItem(r, 0, item_code)
+            self.table.setItem(r, 1, item_name)
+            self.table.setItem(r, 2, item_score)
+            self.table.setItem(r, 3, item_reason)
+            self.table.setItem(r, 4, item_price)
+            self.table.setItem(r, 5, item_pct)
+
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+
+    def _on_failed(self, err: str):
+        self.btn_run.setEnabled(True)
+        self.btn_cancel.setEnabled(False)
+        self.lbl_result_status.setText(f"❌ 失败: {err[:60]}")
+        self.lbl_result_status.setStyleSheet("color: #f85149; font-weight: bold; padding: 4px;")
+        log.error("选股失败: %s", err)
+        QMessageBox.critical(self, "失败", err)
 
     def _on_row_double_clicked(self, index):
         row = index.row()
         code_item = self.table.item(row, 0)
-        if code_item is None:
-            code_item = self.table.item(row, self.table.columnCount() - 1)
-        # 查找 code 列
-        code = None
-        for c in range(self.table.columnCount()):
-            item = self.table.item(row, c)
-            header = self.table.horizontalHeaderItem(c)
-            if header and header.text() == "code" and item:
-                code = item.text()
-                break
-        if code is None and code_item is not None:
-            code = code_item.text()
-        if code:
-            self.code_clicked.emit(str(code).zfill(6))
+        if code_item:
+            self.code_clicked.emit(str(code_item.text()))
 
     def _on_export(self):
-        if self._last_df.empty:
+        if not self._last_results:
             QMessageBox.information(self, "提示", "没有可导出的数据")
             return
-        path, _ = QFileDialog.getSaveFileName(self, "导出 CSV",
-                                              f"screen_result.csv",
-                                              "CSV 文件 (*.csv)")
+        path, _ = QFileDialog.getSaveFileName(self, "导出 CSV", "screen_result.csv", "CSV (*.csv)")
         if not path:
             return
         try:
-            self._last_df.to_csv(path, index=False, encoding="utf-8-sig")
+            rows = []
+            for r in self._last_results:
+                rows.append({
+                    "code": getattr(r, "code", ""),
+                    "name": getattr(r, "name", ""),
+                    "score": getattr(r, "score", 0),
+                    "reasons": ", ".join(getattr(r, "reasons", [])),
+                })
+            pd.DataFrame(rows).to_csv(path, index=False, encoding="utf-8-sig")
             QMessageBox.information(self, "成功", f"已导出到 {path}")
         except Exception as e:
             QMessageBox.critical(self, "失败", str(e))

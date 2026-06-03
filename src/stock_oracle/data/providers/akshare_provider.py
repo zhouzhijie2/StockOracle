@@ -1,4 +1,6 @@
 """AkShare 数据源实现。"""
+import time
+import random
 from typing import List, Optional
 import pandas as pd
 
@@ -21,13 +23,30 @@ def _to_symbol(code: str) -> str:
     return f"{_detect_market(code)}{code}"
 
 
+def _retry_request(func, max_retries=3, base_delay=1.0):
+    """带重试的请求包装器。"""
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise e
+            delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+            log.warning("请求失败，第 %d 次重试，%s 秒后重试...", attempt + 1, delay)
+            time.sleep(delay)
+
+
 class AkShareProvider(DataProvider):
     name = "akshare"
 
     def get_stock_list(self) -> pd.DataFrame:
         import akshare as ak
         log.info("拉取 A 股股票列表...")
-        df = ak.stock_info_a_code_name()
+
+        def fetch():
+            return ak.stock_info_a_code_name()
+
+        df = _retry_request(fetch)
         if df.empty:
             log.warning("股票列表为空")
             return pd.DataFrame(
@@ -64,14 +83,18 @@ class AkShareProvider(DataProvider):
 
         symbol = _to_symbol(code)
         log.info("拉取日线 %s (%s)", code, symbol)
-        try:
-            df = ak.stock_zh_a_hist(
+
+        def fetch():
+            return ak.stock_zh_a_hist(
                 symbol=symbol,
                 period="daily",
                 start_date=(start or "").replace("-", ""),
                 end_date=(end or "").replace("-", ""),
                 adjust=adjust,
             )
+
+        try:
+            df = _retry_request(fetch, max_retries=3, base_delay=2.0)
         except Exception as e:
             log.warning("拉取 %s 日线失败: %s", code, e)
             return pd.DataFrame(
@@ -116,12 +139,16 @@ class AkShareProvider(DataProvider):
         import akshare as ak
 
         symbol = _to_symbol(code)
-        try:
-            df = ak.stock_zh_a_hist_min_em(
+
+        def fetch():
+            return ak.stock_zh_a_hist_min_em(
                 symbol=symbol,
                 period=freq,
                 adjust="qfq",
             )
+
+        try:
+            df = _retry_request(fetch, max_retries=3, base_delay=2.0)
         except Exception as e:
             log.warning("拉取 %s 分钟线失败: %s", code, e)
             return pd.DataFrame(
@@ -163,8 +190,12 @@ class AkShareProvider(DataProvider):
         使用 akshare 的全市场实时行情接口，然后根据 codes 过滤。
         """
         import akshare as ak
+
+        def fetch():
+            return ak.stock_zh_a_spot_em()
+
         try:
-            df = ak.stock_zh_a_spot_em()
+            df = _retry_request(fetch, max_retries=2, base_delay=1.0)
         except Exception as e:
             log.warning("拉取实时行情失败: %s", e)
             return pd.DataFrame()
@@ -220,3 +251,13 @@ class AkShareProvider(DataProvider):
             if col not in df.columns:
                 df[col] = None
         return df[needed].reset_index(drop=True).copy()
+
+    def get_intraday(self, code: str) -> pd.DataFrame:
+        """获取今日分时数据（通过分钟线接口作为后备）。"""
+        df = self.get_minute(code, freq="1", days=1)
+        if df.empty:
+            return pd.DataFrame(columns=["datetime", "price", "volume"])
+        df = df.copy()
+        if "close" in df.columns:
+            df["price"] = pd.to_numeric(df["close"], errors="coerce")
+        return df[["datetime", "price", "volume"]].dropna().copy()

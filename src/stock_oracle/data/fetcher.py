@@ -21,11 +21,12 @@ from ..logger import log
 
 class DataFetcher:
     def __init__(self, provider: Optional[DataProvider] = None):
-        self.provider = provider or get_provider(config.get("data_provider", "akshare"))
-        self.min_sleep = float(config.get("rate_limit_min_sec", 0.3))
-        self.max_sleep = float(config.get("rate_limit_max_sec", 1.0))
+        self.provider = provider or get_provider(config.get("data_provider", "composite"))
+        # 增加请求间隔，避免被限流
+        self.min_sleep = float(config.get("rate_limit_min_sec", 1.0))
+        self.max_sleep = float(config.get("rate_limit_max_sec", 2.0))
         self.history_days = int(config.get("kline_history_days", 500))
-        self.max_workers = 4
+        self.max_workers = 2  # 减少并发数，降低被限流风险
         self._cancel_flag = False
 
     # ---------------- 取消 ----------------
@@ -62,6 +63,14 @@ class DataFetcher:
                         str(row.get("list_date", "")),
                     ),
                 )
+            # 记录股票列表更新时间
+            cur.execute(
+                """
+                INSERT OR REPLACE INTO app_config (key, value)
+                VALUES ('stock_list_updated', ?)
+                """,
+                (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),),
+            )
         log.info("股票列表已更新: %d 只", len(df))
         return len(df)
 
@@ -74,6 +83,15 @@ class DataFetcher:
                 columns=["code", "name", "market", "symbol", "industry", "list_date"]
             )
         return pd.DataFrame([dict(r) for r in rows])
+
+    def get_stock_list_updated_time(self) -> Optional[str]:
+        """获取股票列表最后更新时间。"""
+        with db.cursor() as cur:
+            cur.execute(
+                "SELECT value FROM app_config WHERE key = 'stock_list_updated'"
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
 
     # ---------------- 日线 ----------------
     def get_local_daily(self, code: str, adjust: str = "qfq") -> pd.DataFrame:
@@ -138,6 +156,21 @@ class DataFetcher:
             )
         return len(rows)
 
+    def fetch_and_save_daily(self, code: str) -> pd.DataFrame:
+        """在线拉取日线并保存到数据库，返回DataFrame。供行情中心使用。"""
+        code = str(code).zfill(6)
+        try:
+            df = self.provider.get_daily(code)
+            if not df.empty:
+                self._save_daily(code, df)
+                log.info("行情中心拉取并保存 %s 日线 %d 条", code, len(df))
+            return df
+        except Exception as e:
+            log.warning("行情中心拉取 %s 日线失败: %s", code, e)
+            return pd.DataFrame(
+                columns=["date", "open", "high", "low", "close", "volume", "amount"]
+            )
+
     def fetch_daily(self, code: str, force: bool = False,
                     progress: Optional[Callable[[str, int, int], None]] = None,
                     index_total: Tuple[int, int] = None) -> int:
@@ -175,6 +208,36 @@ class DataFetcher:
         if progress and index_total:
             progress(code, index_total[0], index_total[1])
         return n
+
+    # ---------------- 断点续传 ----------------
+    def save_update_progress(self, last_code: str) -> None:
+        """保存更新进度（用于断点续传）。"""
+        with db.cursor() as cur:
+            cur.execute(
+                """
+                INSERT OR REPLACE INTO app_config (key, value)
+                VALUES ('update_progress', ?)
+                """,
+                (last_code,),
+            )
+
+    def get_update_progress(self) -> Optional[dict]:
+        """获取更新进度。"""
+        with db.cursor() as cur:
+            cur.execute(
+                "SELECT value FROM app_config WHERE key = 'update_progress'"
+            )
+            row = cur.fetchone()
+            if row:
+                return {"last_code": row[0]}
+        return None
+
+    def clear_update_progress(self) -> None:
+        """清除更新进度。"""
+        with db.cursor() as cur:
+            cur.execute(
+                "DELETE FROM app_config WHERE key = 'update_progress'"
+            )
 
     def update_all_daily(self, codes: Optional[List[str]] = None,
                          force: bool = False,

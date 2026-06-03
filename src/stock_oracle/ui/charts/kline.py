@@ -1,113 +1,281 @@
-"""K线图组件（基于 pyqtgraph）。"""
-from typing import List
-
+"""K线图组件（基于 pyqtgraph，深色主题，稳健渲染）。"""
 import numpy as np
 import pandas as pd
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QBrush, QColor, QPen
+
+try:
+    import pyqtgraph as pg
+    HAS_PYQTGRAPH = True
+except ImportError:
+    HAS_PYQTGRAPH = False
+
+
+RED = "#f85149"      # 涨
+GREEN = "#3fb950"    # 跌
+MA5_COLOR = "#ffa502"
+MA10_COLOR = "#388bfd"
+MA20_COLOR = "#a855f7"
+
+# 自定义坐标轴：显示日期字符串
+class DateAxis(pg.AxisItem):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._tick_labels = {}
+        self.setPen(QColor("#8b949e"))
+        self.setTextPen(QColor("#8b949e"))
+
+    def set_date_labels(self, dates):
+        self._tick_labels = {}
+        if not dates:
+            return
+        step = max(1, len(dates) // 12)
+        for i in range(0, len(dates), step):
+            label = str(dates[i])[:10]
+            self._tick_labels[float(i)] = label
+
+    def tickStrings(self, values, scale, spacing):
+        return [self._tick_labels.get(v, "") for v in values]
 
 
 class KLineChart(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._layout = QVBoxLayout(self)
-        self._title = QLabel("K线（日线）")
-        self._title.setAlignment(Qt.AlignCenter)
-        self._layout.addWidget(self._title)
-        self._chart_widget = None
-        self._init_chart()
+        self._layout.setContentsMargins(0, 0, 0, 0)
 
-    def _init_chart(self):
-        try:
-            import pyqtgraph as pg  # type: ignore
-            pg.setConfigOption("background", "w")
-            pg.setConfigOption("foreground", "k")
+        self._price_plot = None
+        self._macd_plot = None
+        self._vol_plot = None
+
+        if HAS_PYQTGRAPH:
+            pg.setConfigOptions(
+                background="#0d1117",
+                foreground="#8b949e",
+                antialias=True,
+                imageAxisOrder="row-major",
+            )
             self._chart_widget = pg.GraphicsLayoutWidget(self)
-            self._layout.addWidget(self._chart_widget)
+            self._chart_widget.setStyleSheet(
+                "background-color: #0d1117; border: 1px solid #30363d; border-radius: 6px;"
+            )
+            self._layout.addWidget(self._chart_widget, stretch=1)
+
+            # 自定义 x 轴
+            self._date_axis = DateAxis(orientation="bottom")
+
+            # 上方 K线
             self._price_plot = self._chart_widget.addPlot(row=0, col=0)
-            self._price_plot.setLabel("left", "价格")
-            self._price_plot.showGrid(x=True, y=True, alpha=0.3)
-            self._price_plot.addLegend()
+            self._price_plot.setMinimumHeight(240)
+            self._price_plot.showGrid(x=True, y=True, alpha=0.2)
+            self._price_plot.setMouseEnabled(x=True, y=True)
+            self._price_plot.hideAxis("bottom")
+            self._price_plot.setLabel("left", "价格", **{"color": "#8b949e"})
+            self._price_plot.getAxis("left").setPen("#8b949e")
+            self._price_plot.getAxis("left").setTextPen("#8b949e")
+            self._price_plot.addLegend(
+                offset=(10, 10), labelTextSize="10pt",
+                brush=QBrush(QColor("#161b22")),
+                pen=QPen(QColor("#30363d")),
+            )
 
+            # 中间 MACD
             self._chart_widget.nextRow()
-            self._vol_plot = self._chart_widget.addPlot(row=1, col=0)
-            self._vol_plot.setLabel("left", "成交量")
-            self._vol_plot.setXLink(self._price_plot)
-            self._vol_plot.showGrid(x=True, y=True, alpha=0.3)
+            self._macd_plot = self._chart_widget.addPlot(row=1, col=0, axisItems={"bottom": DateAxis(orientation="bottom")})
+            self._macd_plot.setMinimumHeight(80)
+            self._macd_plot.setMaximumHeight(120)
+            self._macd_plot.showGrid(x=True, y=False, alpha=0.2)
+            self._macd_plot.setXLink(self._price_plot)
+            self._macd_plot.hideAxis("bottom")
+            self._macd_plot.setLabel("left", "MACD", **{"color": "#8b949e"})
+            self._macd_plot.getAxis("left").setPen("#8b949e")
+            self._macd_plot.getAxis("left").setTextPen("#8b949e")
 
-            self._ma5_item = pg.PlotItem()
-        except Exception:
-            # pyqtgraph 不可用，降级为简单的文本展示
-            self._fallback_label = QLabel("未检测到 pyqtgraph，图表功能已禁用\n请执行: pip install pyqtgraph")
-            self._fallback_label.setAlignment(Qt.AlignCenter)
-            self._layout.addWidget(self._fallback_label)
-            self._chart_widget = None
+            # 下方 成交量
+            self._chart_widget.nextRow()
+            self._vol_plot = self._chart_widget.addPlot(row=2, col=0, axisItems={"bottom": self._date_axis})
+            self._vol_plot.setMinimumHeight(70)
+            self._vol_plot.setMaximumHeight(110)
+            self._vol_plot.showGrid(x=True, y=True, alpha=0.2)
+            self._vol_plot.setXLink(self._price_plot)
+            self._vol_plot.setLabel("left", "成交量", **{"color": "#8b949e"})
+            self._vol_plot.getAxis("left").setPen("#8b949e")
+            self._vol_plot.getAxis("left").setTextPen("#8b949e")
+        else:
+            msg = QLabel(
+                "未检测到 pyqtgraph，图表功能已禁用\n请执行: pip install pyqtgraph"
+            )
+            msg.setAlignment(Qt.AlignCenter)
+            msg.setStyleSheet("color: #8b949e; background: #161b22; padding: 40px;")
+            self._layout.addWidget(msg)
+
+    def _calc_macd(self, closes, nfast=12, nslow=26, nsignal=9):
+        df = pd.Series(closes.astype(float))
+        ema_fast = df.ewm(span=nfast, adjust=False).mean().to_numpy()
+        ema_slow = df.ewm(span=nslow, adjust=False).mean().to_numpy()
+        dif = ema_fast - ema_slow
+        dea = pd.Series(dif).ewm(span=nsignal, adjust=False).mean().to_numpy()
+        macd_hist = (dif - dea) * 2.0
+        return dif, dea, macd_hist
 
     def plot(self, df: pd.DataFrame):
-        if self._chart_widget is None:
-            return
-        if df is None or df.empty:
-            self._title.setText("K线（日线） - 无数据")
+        """绘制 K 线图（蜡烛图 + MA + MACD + 成交量）。"""
+        if self._price_plot is None or df is None or df.empty:
+            self.clear()
             return
 
         d = df.copy()
-        for col in ("open", "high", "low", "close", "volume"):
-            if col not in d.columns:
-                return
-            d[col] = pd.to_numeric(d[col], errors="coerce")
-        d = d.dropna(subset=["open", "high", "low", "close", "volume"]).tail(120)
-        if d.empty:
+        needed_cols = {"open", "high", "low", "close", "volume"}
+        if not needed_cols.issubset(set(d.columns)):
+            self.clear()
             return
 
-        self._price_plot.clear()
-        self._vol_plot.clear()
+        for col in needed_cols:
+            d[col] = pd.to_numeric(d[col], errors="coerce")
+        d = d.dropna(subset=list(needed_cols)).tail(120).reset_index(drop=True)
+        if d.empty:
+            self.clear()
+            return
 
-        import pyqtgraph as pg  # type: ignore
-
-        x = np.arange(len(d))
+        n = len(d)
+        x = np.arange(n, dtype=float)
         opens = d["open"].to_numpy(dtype=float)
         highs = d["high"].to_numpy(dtype=float)
         lows = d["low"].to_numpy(dtype=float)
         closes = d["close"].to_numpy(dtype=float)
         volumes = d["volume"].to_numpy(dtype=float)
+        dates = d["date"].astype(str).tolist() if "date" in d.columns else []
 
-        # 蜡烛图：用竖线表示 high-low，用矩形表示 open-close
-        for i in range(len(x)):
-            col = (200, 30, 30) if closes[i] >= opens[i] else (30, 140, 30)
-            # 影线
-            line = pg.PlotDataItem([x[i], x[i]], [lows[i], highs[i]],
-                                   pen=pg.mkPen(col, width=1))
-            self._price_plot.addItem(line)
-            # 实体
-            rect = pg.BarGraphItem(x=[x[i]], height=[abs(closes[i] - opens[i])],
-                                   width=0.7,
-                                   y0=min(opens[i], closes[i]),
-                                   brush=pg.mkBrush(col))
-            self._price_plot.addItem(rect)
+        # --- 清空并重建 ---
+        self._price_plot.clear()
+        self._macd_plot.clear()
+        self._vol_plot.clear()
 
-        # MA5 / MA10 / MA20
-        for n, color in [(5, (255, 165, 0)), (10, (0, 100, 200)), (20, (180, 0, 200))]:
-            if len(closes) >= n:
-                ma = pd.Series(closes).rolling(n).mean().to_numpy()
-                self._price_plot.plot(x, ma, pen=pg.mkPen(color, width=1.5),
-                                      name=f"MA{n}")
+        # 重建图例
+        self._price_plot.addLegend(
+            offset=(10, 10), labelTextSize="10pt",
+            brush=QBrush(QColor("#161b22")),
+            pen=QPen(QColor("#30363d")),
+        )
 
-        # 成交量：根据涨跌颜色
-        colors = []
-        for i in range(len(x)):
-            colors.append(
-                pg.mkBrush(200, 30, 30) if closes[i] >= opens[i]
-                else pg.mkBrush(30, 140, 30)
+        # --- 蜡烛图: 绘制影线 + 实体 ---
+        # 影线（最高价-最低价的垂直线）分涨/跌两类
+        up_mask = closes >= opens
+        down_mask = ~up_mask
+
+        candle_width = 0.65
+
+        # 影线 (wicks) - 使用 Qt graphics lines 更高效
+        for i in range(n):
+            color = RED if up_mask[i] else GREEN
+            pen = QPen(QColor(color))
+            pen.setWidth(1)
+            line = pg.PlotCurveItem(
+                [i, i], [lows[i], highs[i]],
+                pen=pen,
             )
-        vol_bars = pg.BarGraphItem(x=x, height=volumes, width=0.7,
-                                   brushes=colors)
-        self._vol_plot.addItem(vol_bars)
+            self._price_plot.addItem(line)
 
-        # 日期轴（简化）
-        tick_dates = d["date"].to_list() if "date" in d.columns else [str(i) for i in x]
-        ax = self._price_plot.getAxis("bottom")
-        ticks_per = max(1, len(tick_dates) // 10)
-        ticks = [(i, str(tick_dates[i])[:10]) for i in range(0, len(tick_dates), ticks_per)]
-        ax.setTicks([ticks])
+        # 蜡烛实体（用 BarGraphItem 批量绘制）
+        up_x = x[up_mask]
+        up_y0 = np.minimum(opens[up_mask], closes[up_mask])
+        up_heights = np.abs(closes[up_mask] - opens[up_mask])
+        if len(up_x) > 0:
+            up_bars = pg.BarGraphItem(
+                x=up_x, height=up_heights, y0=up_y0,
+                width=candle_width,
+                brush=QBrush(QColor(RED)),
+                pen=QPen(QColor(RED)),
+            )
+            self._price_plot.addItem(up_bars)
 
-        self._title.setText(f"K线（最近 {len(d)} 日）")
+        down_x = x[down_mask]
+        down_y0 = np.minimum(opens[down_mask], closes[down_mask])
+        down_heights = np.abs(closes[down_mask] - opens[down_mask])
+        if len(down_x) > 0:
+            down_bars = pg.BarGraphItem(
+                x=down_x, height=down_heights, y0=down_y0,
+                width=candle_width,
+                brush=QBrush(QColor(GREEN)),
+                pen=QPen(QColor(GREEN)),
+            )
+            self._price_plot.addItem(down_bars)
+
+        # --- MA 均线 ---
+        closes_series = pd.Series(closes.astype(float))
+        for ma_n, color in [(5, MA5_COLOR), (10, MA10_COLOR), (20, MA20_COLOR)]:
+            if n >= ma_n:
+                ma_vals = closes_series.rolling(ma_n).mean().to_numpy()
+                self._price_plot.plot(
+                    x[ma_n - 1:], ma_vals[ma_n - 1:],
+                    pen=QPen(QColor(color), 1.5),
+                    name=f"MA{ma_n}",
+                )
+
+        # --- MACD ---
+        if n >= 26:
+            dif, dea, macd_hist = self._calc_macd(closes)
+            # DIF / DEA 线
+            self._macd_plot.plot(x, dif, pen=QPen(QColor(MA5_COLOR), 1.2), name="DIF")
+            self._macd_plot.plot(x, dea, pen=QPen(QColor(MA10_COLOR), 1.2), name="DEA")
+
+            # MACD 柱
+            macd_up = x[macd_hist >= 0]
+            macd_up_h = np.abs(macd_hist[macd_hist >= 0])
+            macd_up_y0 = np.zeros_like(macd_up_h)
+            if len(macd_up) > 0:
+                self._macd_plot.addItem(pg.BarGraphItem(
+                    x=macd_up, height=macd_up_h, y0=macd_up_y0,
+                    width=candle_width * 0.7,
+                    brush=QBrush(QColor(RED)),
+                    pen=QPen(QColor(RED)),
+                ))
+
+            macd_down = x[macd_hist < 0]
+            macd_down_h = np.abs(macd_hist[macd_hist < 0])
+            macd_down_y0 = -macd_down_h
+            if len(macd_down) > 0:
+                self._macd_plot.addItem(pg.BarGraphItem(
+                    x=macd_down, height=macd_down_h, y0=macd_down_y0,
+                    width=candle_width * 0.7,
+                    brush=QBrush(QColor(GREEN)),
+                    pen=QPen(QColor(GREEN)),
+                ))
+
+        # --- 成交量 ---
+        vol_up_x = x[up_mask]
+        vol_up_h = volumes[up_mask]
+        if len(vol_up_x) > 0:
+            self._vol_plot.addItem(pg.BarGraphItem(
+                x=vol_up_x, height=vol_up_h,
+                width=candle_width,
+                brush=QBrush(QColor(RED)),
+                pen=QPen(QColor(RED)),
+            ))
+
+        vol_down_x = x[down_mask]
+        vol_down_h = volumes[down_mask]
+        if len(vol_down_x) > 0:
+            self._vol_plot.addItem(pg.BarGraphItem(
+                x=vol_down_x, height=vol_down_h,
+                width=candle_width,
+                brush=QBrush(QColor(GREEN)),
+                pen=QPen(QColor(GREEN)),
+            ))
+
+        # --- 设置 x 轴日期标签 ---
+        if dates:
+            self._date_axis.set_date_labels(dates)
+            self._vol_plot.setXRange(-0.5, n - 0.5, padding=0)
+        else:
+            self._vol_plot.setXRange(-0.5, n - 0.5, padding=0)
+
+    def clear(self):
+        """清空图表。"""
+        if self._price_plot:
+            self._price_plot.clear()
+        if self._macd_plot:
+            self._macd_plot.clear()
+        if self._vol_plot:
+            self._vol_plot.clear()

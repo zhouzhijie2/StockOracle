@@ -161,3 +161,7 @@ class EFinanceProvider(DataProvider):
             if col not in df.columns:
                 df[col] = None
         return df[needed].reset_index(drop=True).copy()
+
+    def get_intraday(self, code: str) -> pd.DataFrame:
+        """获取今日分时数据（efinance 分钟线接口）。"""
+        return self.get_minute(code, freq="1", days=1)

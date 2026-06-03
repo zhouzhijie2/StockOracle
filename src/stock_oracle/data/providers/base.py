@@ -49,6 +49,13 @@ class DataProvider(ABC):
         """
         ...
 
+    def get_intraday(self, code: str) -> pd.DataFrame:
+        """
+        获取今日分时数据（1分钟粒度）。返回列:
+        [datetime, price, volume]
+        """
+        raise NotImplementedError
+
     def health_check(self) -> bool:
         try:
             df = self.get_stock_list()

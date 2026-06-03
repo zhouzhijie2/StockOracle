@@ -1,10 +1,12 @@
-"""设置 Tab。"""
+"""设置中心。"""
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QFormLayout, QComboBox, QSpinBox, QCheckBox,
     QLineEdit, QPushButton, QGroupBox, QLabel, QMessageBox, QFileDialog,
+    QHBoxLayout,
 )
+from PySide6.QtCore import Qt
+
 from ... import config
-from ...logger import log
 
 
 class SettingsWidget(QWidget):
@@ -15,96 +17,126 @@ class SettingsWidget(QWidget):
 
     def _build_ui(self):
         root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(12)
 
-        box = QGroupBox("应用设置")
-        form = QFormLayout(box)
+        # ============ 数据源 ============
+        provider_box = QGroupBox("数据源")
+        pf = QFormLayout(provider_box)
+        pf.setContentsMargins(16, 20, 16, 16)
+        pf.setSpacing(10)
 
         self.provider_combo = QComboBox()
-        self.provider_combo.addItems(["akshare", "efinance"])
-        form.addRow("数据源", self.provider_combo)
+        self.provider_combo.addItem("akshare (A股实时行情)", "akshare")
+        self.provider_combo.addItem("efinance (备用)", "efinance")
+        self.provider_combo.setFixedHeight(30)
+        pf.addRow("数据源", self.provider_combo)
+
+        root.addWidget(provider_box)
+
+        # ============ 盯盘设置 ============
+        watch_box = QGroupBox("盯盘")
+        wf = QFormLayout(watch_box)
+        wf.setContentsMargins(16, 20, 16, 16)
+        wf.setSpacing(10)
 
         self.interval_spin = QSpinBox()
         self.interval_spin.setRange(1, 600)
-        form.addRow("盯盘刷新间隔 (秒)", self.interval_spin)
+        self.interval_spin.setSuffix(" 秒")
+        self.interval_spin.setFixedHeight(28)
+        wf.addRow("刷新间隔", self.interval_spin)
 
-        self.sound_cb = QCheckBox("启用提示音")
-        form.addRow("通知", self.sound_cb)
+        self.sound_cb = QCheckBox("启用声音提示")
+        self.sound_cb.setChecked(False)
+        wf.addRow("声音提示", self.sound_cb)
 
-        self.sound_file = QLineEdit()
-        self.sound_file.setPlaceholderText("（可选）自定义提示音路径")
-        row = QFileDialogPushRow(self.sound_file, "选择音频文件", "音频 (*.wav *.mp3)")
-        form.addRow("提示音文件", row.widget())
+        root.addWidget(watch_box)
+
+        # ============ 代理设置 ============
+        proxy_box = QGroupBox("网络代理")
+        proxyf = QFormLayout(proxy_box)
+        proxyf.setContentsMargins(16, 20, 16, 16)
+        proxyf.setSpacing(10)
 
         self.http_proxy = QLineEdit()
-        self.http_proxy.setPlaceholderText("例如 http://127.0.0.1:7890 （可留空）")
-        form.addRow("HTTP 代理", self.http_proxy)
+        self.http_proxy.setPlaceholderText("例如 http://127.0.0.1:7890 (可留空)")
+        self.http_proxy.setFixedHeight(30)
+        proxyf.addRow("HTTP 代理", self.http_proxy)
 
         self.https_proxy = QLineEdit()
-        self.https_proxy.setPlaceholderText("例如 http://127.0.0.1:7890 （可留空）")
-        form.addRow("HTTPS 代理", self.https_proxy)
+        self.https_proxy.setPlaceholderText("例如 http://127.0.0.1:7890 (可留空)")
+        self.https_proxy.setFixedHeight(30)
+        proxyf.addRow("HTTPS 代理", self.https_proxy)
+
+        root.addWidget(proxy_box)
+
+        # ============ K线数据 ============
+        kline_box = QGroupBox("K线数据")
+        kf = QFormLayout(kline_box)
+        kf.setContentsMargins(16, 20, 16, 16)
+        kf.setSpacing(10)
 
         self.kline_days = QSpinBox()
         self.kline_days.setRange(30, 5000)
-        self.kline_days.setValue(500)
-        form.addRow("K线历史天数（默认 500）", self.kline_days)
+        self.kline_days.setSuffix(" 天")
+        self.kline_days.setFixedHeight(28)
+        kf.addRow("历史天数", self.kline_days)
 
-        root.addWidget(box)
+        root.addWidget(kline_box)
+
+        # ============ 保存按钮 ============
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
 
         self.btn_save = QPushButton("💾 保存设置")
+        self.btn_save.setObjectName("primaryButton")
+        self.btn_save.setFixedHeight(40)
+        self.btn_save.setMinimumWidth(140)
         self.btn_save.clicked.connect(self._on_save)
-        root.addWidget(self.btn_save)
+        btn_row.addWidget(self.btn_save)
 
-        self.info = QLabel("设置保存后将立即生效。")
-        root.addWidget(self.info)
+        root.addLayout(btn_row)
+
+        self.info_label = QLabel("")
+        self.info_label.setAlignment(Qt.AlignCenter)
+        self.info_label.setStyleSheet("color: #8b949e; font-size: 13px; padding: 8px;")
+        root.addWidget(self.info_label)
+
         root.addStretch(1)
 
     def _load(self):
+        """加载配置。"""
         cfg = config.load_config()
-        idx = self.provider_combo.findText(cfg.get("data_provider", "akshare"))
+
+        # 数据源
+        provider = cfg.get("data_provider", "akshare")
+        idx = self.provider_combo.findData(provider)
         if idx >= 0:
             self.provider_combo.setCurrentIndex(idx)
+
+        # 盯盘
         self.interval_spin.setValue(int(cfg.get("refresh_interval_sec", 5)))
         self.sound_cb.setChecked(bool(cfg.get("enable_sound", False)))
-        self.sound_file.setText(str(cfg.get("sound_file", "")))
+
+        # 代理
         self.http_proxy.setText(str(cfg.get("http_proxy", "")))
         self.https_proxy.setText(str(cfg.get("https_proxy", "")))
+
+        # K线
         self.kline_days.setValue(int(cfg.get("kline_history_days", 500)))
 
     def _on_save(self):
+        """保存设置。"""
         cfg = {
-            "data_provider": self.provider_combo.currentText(),
+            "data_provider": self.provider_combo.currentData(),
             "refresh_interval_sec": self.interval_spin.value(),
             "enable_sound": self.sound_cb.isChecked(),
-            "sound_file": self.sound_file.text().strip(),
+            "sound_file": "",
             "http_proxy": self.http_proxy.text().strip(),
             "https_proxy": self.https_proxy.text().strip(),
             "kline_history_days": self.kline_days.value(),
         }
         config.save_config(cfg)
-        self.info.setText("✅ 设置已保存。")
-        log.info("设置已保存")
+        self.info_label.setText("✅ 设置已保存")
+        self.info_label.setStyleSheet("color: #3fb950; font-size: 13px; padding: 8px; font-weight: bold;")
         QMessageBox.information(self, "成功", "设置已保存")
-
-
-class QFileDialogPushRow:
-    """简单的 QLineEdit + 按钮组合，用于选择文件路径。"""
-    def __init__(self, line_edit: QLineEdit, btn_text: str, file_filter: str):
-        self._line_edit = line_edit
-        self._filter = file_filter
-        self._container = QWidget()
-        from PySide6.QtWidgets import QHBoxLayout, QPushButton
-        layout = QHBoxLayout(self._container)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(line_edit, stretch=1)
-        btn = QPushButton(btn_text)
-        btn.clicked.connect(self._pick)
-        layout.addWidget(btn)
-
-    def widget(self) -> QWidget:
-        return self._container
-
-    def _pick(self):
-        from PySide6.QtWidgets import QFileDialog
-        path, _ = QFileDialog.getOpenFileName(self._container, "选择文件", "", self._filter)
-        if path:
-            self._line_edit.setText(path)

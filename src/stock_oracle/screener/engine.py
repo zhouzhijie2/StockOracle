@@ -83,13 +83,13 @@ def rule_consolidation_breakout(df: pd.DataFrame, params: Dict[str, Any]) -> Rul
     if not _ensure_valid(df):
         return r
 
-    consolidation_days = int(params.get("consolidation_days", 20))
-    range_pct = float(params.get("consolidation_range_pct", 15.0)) / 100.0
-    shrink_ratio = float(params.get("shrink_vol_ratio", 0.7))
-    today_min = float(params.get("today_min_pct", 5.0))
-    today_max = float(params.get("today_max_pct", 7.0))
-    vol_expansion = float(params.get("vol_expansion_ratio", 2.0))
-    need_above_ma20 = bool(params.get("price_above_ma20", True))
+    consolidation_days = int(params.get("横盘天数", params.get("consolidation_days", 20)))
+    range_pct = float(params.get("横盘振幅(%)", params.get("consolidation_range_pct", 15.0))) / 100.0
+    shrink_ratio = float(params.get("缩量比", params.get("shrink_vol_ratio", 0.7)))
+    today_min = float(params.get("最小涨幅(%)", params.get("today_min_pct", 5.0)))
+    today_max = float(params.get("最大涨幅(%)", params.get("today_max_pct", 7.0)))
+    vol_expansion = float(params.get("量能放大倍数", params.get("vol_expansion_ratio", 2.0)))
+    need_above_ma20 = bool(params.get("价格站上MA20", params.get("price_above_ma20", True)))
 
     if len(df) < consolidation_days + 5:
         return r
@@ -110,7 +110,7 @@ def rule_consolidation_breakout(df: pd.DataFrame, params: Dict[str, Any]) -> Rul
         return r
 
     # 2) 缩量：后 5 日量 / 前 (consolidation_days - 5) 日量 <= shrink_ratio
-    shrink_window = int(params.get("shrink_window", 5))
+    shrink_window = int(params.get("缩量窗口天数", params.get("shrink_window", 5)))
     recent_vol = float(win.tail(shrink_window)["volume"].mean())
     prev_vol = float(win.head(len(win) - shrink_window)["volume"].mean())
     if prev_vol <= 0 or recent_vol / prev_vol > shrink_ratio:
@@ -152,9 +152,9 @@ def rule_consolidation_breakout(df: pd.DataFrame, params: Dict[str, Any]) -> Rul
         f"量能放大 {round(float(today['volume'])/vol_ma, 2) if vol_ma>0 else 0} 倍",
     ]
     r.extras = {
-        "pct_today": round(pct_today, 2),
-        "vol_ratio": round(float(today["volume"]) / vol_ma, 2) if vol_ma > 0 else 0,
-        "hl_ratio": round(hh / ll, 3) if ll > 0 else 0,
+        "今日涨幅": round(pct_today, 2),
+        "量比": round(float(today["volume"]) / vol_ma, 2) if vol_ma > 0 else 0,
+        "振幅": round((hh / ll - 1) * 100, 2) if ll > 0 else 0,
     }
     return r
 
@@ -165,8 +165,8 @@ def rule_ma_cross(df: pd.DataFrame, params: Dict[str, Any]) -> RuleResult:
     if not _ensure_valid(df) or len(df) < 25:
         return r
 
-    short = int(params.get("short", 5))
-    long = int(params.get("long", 20))
+    short = int(params.get("短期均线", params.get("short", 5)))
+    long = int(params.get("长期均线", params.get("long", 20)))
     n = len(df)
     close = df["close"].astype(float)
     ma_s = close.rolling(short).mean()
@@ -181,7 +181,7 @@ def rule_ma_cross(df: pd.DataFrame, params: Dict[str, Any]) -> RuleResult:
     pct_today = (close.iloc[-1] / close.iloc[-2] - 1) * 100 if n > 1 else 0
     r.score = max(0.0, diff_pct) * 5 + max(0.0, pct_today)
     r.reasons = [f"MA{short} 上穿 MA{long}", f"短长均线差 {round(diff_pct, 2)}%"]
-    r.extras = {"pct_today": round(pct_today, 2)}
+    r.extras = {"今日涨幅": round(pct_today, 2)}
     return r
 
 
@@ -210,7 +210,7 @@ def rule_macd_golden(df: pd.DataFrame, params: Dict[str, Any]) -> RuleResult:
         f"MACD 金叉 (DIF={round(dif.iloc[-1], 3)}, DEA={round(dea.iloc[-1], 3)})",
         ("零轴上方" if dif.iloc[-1] > 0 else "零轴下方"),
     ]
-    r.extras = {"dif": round(dif.iloc[-1], 3), "dea": round(dea.iloc[-1], 3)}
+    r.extras = {"DIF": round(dif.iloc[-1], 3), "DEA": round(dea.iloc[-1], 3)}
     return r
 
 
@@ -220,8 +220,8 @@ def rule_new_high_breakout(df: pd.DataFrame, params: Dict[str, Any]) -> RuleResu
     if not _ensure_valid(df):
         return r
 
-    n = int(params.get("n_days", 20))
-    vol_ratio = float(params.get("vol_ratio", 1.5))
+    n = int(params.get("突破天数", params.get("n_days", 20)))
+    vol_ratio = float(params.get("量比阈值", params.get("vol_ratio", 1.5)))
     if len(df) < n + 1:
         return r
 
@@ -245,7 +245,7 @@ def rule_new_high_breakout(df: pd.DataFrame, params: Dict[str, Any]) -> RuleResu
         f"突破 {n} 日新高（前高 {round(prev_high, 2)}，今日 {round(today, 2)}）",
         f"量能放大 {round(vr, 2)} 倍",
     ]
-    r.extras = {"pct_today": round(pct_today, 2), "vol_ratio": round(vr, 2)}
+    r.extras = {"今日涨幅": round(pct_today, 2), "量比": round(vr, 2)}
     return r
 
 
@@ -280,7 +280,7 @@ def rule_limit_up(df: pd.DataFrame, params: Dict[str, Any]) -> RuleResult:
     r.hit = True
     r.score = 5.0 + min(pct - limit, 5.0)
     r.reasons = [f"涨停（涨 {round(pct, 2)}%, limit≈{limit}%）"]
-    r.extras = {"pct": round(pct, 2)}
+    r.extras = {"涨幅": round(pct, 2)}
     return r
 
 
@@ -289,20 +289,20 @@ RuleRegistry.register(
     "consolidation_breakout",
     rule_consolidation_breakout,
     {
-        "consolidation_days": 20,
-        "consolidation_range_pct": 15.0,
-        "shrink_vol_ratio": 0.7,
-        "today_min_pct": 5.0,
-        "today_max_pct": 11.0,
-        "vol_expansion_ratio": 2.0,
-        "price_above_ma20": True,
+        "横盘天数": 20,
+        "横盘振幅(%)": 15.0,
+        "缩量比": 0.7,
+        "最小涨幅(%)": 5.0,
+        "最大涨幅(%)": 11.0,
+        "量能放大倍数": 2.0,
+        "价格站上MA20": True,
     },
     "底部横盘缩量 + 今日放量上涨",
 )
 RuleRegistry.register(
     "ma_cross",
     rule_ma_cross,
-    {"short": 5, "long": 20},
+    {"短期均线": 5, "长期均线": 20},
     "MA5 上穿 MA20",
 )
 RuleRegistry.register(
@@ -314,7 +314,7 @@ RuleRegistry.register(
 RuleRegistry.register(
     "new_high_breakout",
     rule_new_high_breakout,
-    {"n_days": 20, "vol_ratio": 1.5},
+    {"突破天数": 20, "量比阈值": 1.5},
     "放量突破 20 日新高",
 )
 RuleRegistry.register(
@@ -342,14 +342,14 @@ def run_all(klines: Dict[str, pd.DataFrame],
 
 def results_to_dataframe(results: List[RuleResult]) -> pd.DataFrame:
     if not results:
-        return pd.DataFrame(columns=["code", "name", "score", "reasons"])
+        return pd.DataFrame(columns=["代码", "名称", "评分", "理由"])
     rows = []
     for r in results:
         rows.append({
-            "code": r.code,
-            "name": r.name,
-            "score": round(r.score, 2),
-            "reasons": " | ".join(r.reasons),
+            "代码": r.code,
+            "名称": r.name,
+            "评分": round(r.score, 2),
+            "理由": " | ".join(r.reasons),
             **{k: v for k, v in (r.extras or {}).items()},
         })
     return pd.DataFrame(rows)

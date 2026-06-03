@@ -72,6 +72,9 @@ class Watcher:
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
+    def is_alive(self) -> bool:
+        return self.running
+
     def start(self) -> None:
         if self.running:
             return
