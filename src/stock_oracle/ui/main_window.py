@@ -148,19 +148,15 @@ class MainWindow(QMainWindow):
     def _update_status_bar(self):
         """更新状态栏和顶部统计信息。"""
         try:
-            conn = _db._get_conn()
-            cur = conn.cursor()
+            with _db.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM stock_list")
+                stock_count = cur.fetchone()[0]
 
-            cur.execute("SELECT COUNT(*) FROM stocks")
-            stock_count = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM kline_daily")
+                daily_count = cur.fetchone()[0]
 
-            cur.execute("SELECT COUNT(*) FROM kline_daily")
-            daily_count = cur.fetchone()[0]
-
-            cur.execute("SELECT COUNT(*) FROM watchlist_groups")
-            watch_count = cur.fetchone()[0]
-
-            cur.close()
+                cur.execute("SELECT COUNT(DISTINCT code) FROM watch_log")
+                watch_count = cur.fetchone()[0]
 
             self.stat_stocks.setText(str(stock_count))
             self.stat_daily.setText(f"{daily_count:,}")
@@ -169,8 +165,8 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 f"  ✓ 数据源: composite   |   本地数据: {stock_count} 只股票 / {daily_count:,} 条 K 线"
             )
-        except Exception:
-            self.statusBar().showMessage("  ✓ 数据源: composite")
+        except Exception as e:
+            self.statusBar().showMessage(f"  ⚠ 数据统计异常: {str(e)[:30]}")
 
     def _on_code_clicked(self, code: str):
         """选股/盯盘点击代码时的处理（移除行情中心跳转）。"""
