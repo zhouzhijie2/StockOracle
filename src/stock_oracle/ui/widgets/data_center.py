@@ -1,11 +1,15 @@
-"""数据中心 Tab（含智能增量更新 + 断点续传 + 数据预览）。"""
-from typing import Dict, Optional
+"""数据中心 Tab（含智能增量更新 + 断点续传 + 数据预览 + 并发优化）。"""
+import time
+import random
+from datetime import datetime
+from typing import Dict, Optional, List, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QProgressBar,
     QTextEdit, QGroupBox, QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
 )
-from PySide6.QtCore import QThread, Signal, Qt
+from PySide6.QtCore import QThread, Signal, Qt, QMutex, QWaitCondition
 
 from ...data.fetcher import DataFetcher
 from ...logger import log
@@ -60,51 +64,63 @@ class _DataThread(QThread):
                     else:
                         self.log.emit("💡 未找到上次进度，从头开始")
 
-            self.log.emit(f"🚀 开始{action_name}更新 {total} 只股票的日线")
+            codes_to_process = codes[start_idx:]
+            self.log.emit(f"🚀 开始{action_name}更新 {total} 只股票的日线（本次处理 {len(codes_to_process)} 只）")
+            self.log.emit(f"⚡ 并发模式：8 线程同时拉取")
             self.log.emit("💡 已更新到最新日期的会自动跳过，不重复拉取")
 
-            last_code = ""
-            for i in range(start_idx, len(codes)):
-                code = codes[i]
+            # 快速判断：先批量查询哪些股票需要更新
+            if not (self.action == "full"):
+                self.log.emit("📊 快速检查哪些股票需要更新...")
+                last_dates = self.fetcher.get_all_last_dates()
+                today = datetime.now().date()
+                
+                # 筛选出真正需要更新的股票
+                codes_need_update = []
+                for code in codes_to_process:
+                    last_date = last_dates.get(code)
+                    if last_date:
+                        try:
+                            last_dt = datetime.strptime(last_date, "%Y-%m-%d").date()
+                            if last_dt >= today:
+                                continue  # 已是最新
+                        except:
+                            pass
+                    codes_need_update.append(code)
+                
+                if len(codes_need_update) < len(codes_to_process):
+                    skipped_count = len(codes_to_process) - len(codes_need_update)
+                    self.log.emit(f"⚡ 快速跳过 {skipped_count} 只已是最新的股票")
+                    skipped += skipped_count
+                    codes_to_process = codes_need_update
+                else:
+                    self.log.emit(f"📋 全部 {len(codes_to_process)} 只股票需要更新")
 
-                if self.isInterruptionRequested():
-                    self.fetcher.save_update_progress(last_code)
-                    self.log.emit(f"⏹️ 已暂停。进度已保存：{code}（{i+1}/{total}）")
-                    self.log.emit(f"   下次继续时会从这里开始，无需重新处理")
-                    self.finished_ok.emit(i - start_idx, updated, skipped, failed, code)
-                    return
+            # 并发更新
+            if len(codes_to_process) == 0:
+                self.log.emit("✅ 所有股票已是最新，无需更新！")
+                results = []
+            else:
+                results = self._concurrent_fetch(
+                    codes_to_process,
+                    force=(self.action == "full"),
+                    total=total,
+                    start_idx=start_idx
+                )
 
-                try:
-                    n_rows = self.fetcher.fetch_daily(
-                        code,
-                        force=(self.action == "full"),
-                        index_total=(i + 1, total)
-                    )
-                    if n_rows > 0:
-                        updated += 1
-                        status = f"新增 {n_rows} 条"
-                    else:
-                        skipped += 1
-                        status = "已是最新"
-                except Exception as e:
+            for code, status, n_rows in results:
+                if status == "updated":
+                    updated += 1
+                elif status == "skipped":
+                    skipped += 1
+                elif status == "failed":
                     failed += 1
-                    status = f"失败({str(e)[:20]})"
-
-                last_code = code
-
-                if (i + 1) % 20 == 0 or i == total - 1 or status.startswith("失败"):
-                    self.progress.emit(i + 1, total, code, updated, skipped, failed)
-
-                if (i + 1) % 50 == 0:
-                    self.fetcher.save_update_progress(code)
-
-                self.log.emit(f"  {i+1:4d}/{total}  {code}  →  {status}")
 
             self.fetcher.clear_update_progress()
 
             self.log.emit(f"")
             self.log.emit(f"✅ {action_name}更新完成！")
-            self.log.emit(f"   📊 总计：{total} 只（本次处理 {total - start_idx} 只）")
+            self.log.emit(f"   📊 总计：{total} 只（本次处理 {len(codes_to_process)} 只）")
             self.log.emit(f"   🆕 新增数据：{updated} 只")
             self.log.emit(f"   ⏭️ 已是最新：{skipped} 只")
             self.log.emit(f"   ❌ 失败：{failed} 只")
@@ -112,6 +128,129 @@ class _DataThread(QThread):
 
         except Exception as e:
             self.failed.emit(str(e))
+
+    def _concurrent_fetch(self, codes: List[str], force: bool, total: int, start_idx: int) -> List[Tuple[str, str, int]]:
+        """并发拉取股票日线数据，支持重试机制。"""
+        max_workers = 8
+        results = []
+        updated = 0
+        skipped = 0
+        failed = 0
+        processed = 0
+        last_code = ""
+        
+        # 需要重试的股票
+        retry_queue = []
+        max_retries = 3
+        retry_delay = 30  # 静默30秒后重试
+
+        def _fetch_with_retry(code: str, force: bool, retry_count: int = 0) -> Tuple[str, str, int]:
+            """带重试机制的单只股票拉取"""
+            try:
+                n_rows = self.fetcher.fetch_daily(
+                    code,
+                    force=force,
+                    index_total=(start_idx + processed + 1, total)
+                )
+                if n_rows > 0:
+                    return (code, "updated", n_rows)
+                else:
+                    # 检查是否是因为网络错误导致的失败
+                    # fetch_daily 返回 0 可能是：1) 已是最新 2) 网络错误
+                    # 我们需要区分这两种情况
+                    return (code, "skipped", 0)
+            except Exception as e:
+                # 网络异常，需要重试
+                if retry_count < max_retries:
+                    return (code, "retry", retry_count + 1)
+                else:
+                    return (code, "failed", 0)
+
+        # 第一轮：并发拉取
+        self.log.emit("📡 第一轮并发拉取开始...")
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_fetch_with_retry, code, force): code for code in codes}
+            
+            for future in as_completed(futures):
+                if self.isInterruptionRequested():
+                    self.fetcher.save_update_progress(last_code)
+                    self.log.emit(f"⏹️ 已暂停。进度已保存")
+                    return results
+
+                code = futures[future]
+                try:
+                    result = future.result()
+                    if result[1] == "retry":
+                        retry_queue.append((code, result[2]))
+                    else:
+                        results.append(result)
+                        if result[1] == "updated":
+                            updated += 1
+                        elif result[1] == "skipped":
+                            skipped += 1
+                        elif result[1] == "failed":
+                            failed += 1
+                    
+                    last_code = code
+                    processed += 1
+                    
+                    if processed % 20 == 0 or processed == len(codes):
+                        self.progress.emit(start_idx + processed, total, code, updated, skipped, failed)
+                    
+                    if processed % 50 == 0:
+                        self.fetcher.save_update_progress(code)
+
+                    status_text = {
+                        "updated": f"新增 {result[2]} 条",
+                        "skipped": "已是最新",
+                        "failed": "失败",
+                        "retry": "待重试"
+                    }[result[1]]
+                    self.log.emit(f"  {start_idx + processed:4d}/{total}  {code}  →  {status_text}")
+
+                except Exception as e:
+                    failed += 1
+                    results.append((code, "failed", 0))
+                    self.log.emit(f"  {start_idx + processed:4d}/{total}  {code}  →  失败({str(e)[:20]})")
+
+        # 重试失败的股票
+        if retry_queue:
+            self.log.emit(f"")
+            self.log.emit(f"🔄 准备重试 {len(retry_queue)} 只失败的股票")
+            self.log.emit(f"⏳ 静默 {retry_delay} 秒后开始重试...")
+            time.sleep(retry_delay)
+            
+            retry_results = []
+            with ThreadPoolExecutor(max_workers=max_workers // 2) as executor:
+                futures = {}
+                for code, retry_count in retry_queue:
+                    futures[executor.submit(_fetch_with_retry, code, force, retry_count)] = code
+                
+                for future in as_completed(futures):
+                    if self.isInterruptionRequested():
+                        self.fetcher.save_update_progress(last_code)
+                        return results
+
+                    code = futures[future]
+                    try:
+                        result = future.result()
+                        if result[1] == "updated":
+                            updated += 1
+                            failed -= 1  # 从失败中扣除
+                            self.log.emit(f"  🔄 重试 {code} → 成功，新增 {result[2]} 条")
+                        elif result[1] == "skipped":
+                            skipped += 1
+                            failed -= 1
+                            self.log.emit(f"  🔄 重试 {code} → 已是最新")
+                        else:
+                            self.log.emit(f"  🔄 重试 {code} → 仍失败")
+                        results.append(result)
+                        last_code = code
+                        
+                    except Exception as e:
+                        self.log.emit(f"  🔄 重试 {code} → 异常({str(e)[:20]})")
+
+        return results
 
 
 class DataCenterWidget(QWidget):
@@ -153,6 +292,11 @@ class DataCenterWidget(QWidget):
         self.btn_full.setFixedHeight(40)
         self.btn_full.clicked.connect(lambda: self._start("full"))
         ops_layout.addWidget(self.btn_full)
+
+        self.btn_refresh = QPushButton("🔃 刷新展示")
+        self.btn_refresh.setFixedHeight(40)
+        self.btn_refresh.clicked.connect(self._refresh_display)
+        ops_layout.addWidget(self.btn_refresh)
 
         self.btn_cancel = QPushButton("⏹ 暂停")
         self.btn_cancel.setFixedHeight(40)
@@ -393,6 +537,12 @@ class DataCenterWidget(QWidget):
         self._thread.failed.connect(self._on_failed)
         self._thread.start()
 
+    def _refresh_display(self):
+        """刷新数据展示（摘要和预览）。"""
+        self._refresh_summary()
+        self._refresh_preview()
+        self._log("🔃 已刷新数据展示")
+
     def _cancel(self):
         if self._thread and self._thread.isRunning():
             self._thread.requestInterruption()
@@ -403,6 +553,7 @@ class DataCenterWidget(QWidget):
         self.btn_list.setEnabled(enabled)
         self.btn_incr.setEnabled(enabled)
         self.btn_full.setEnabled(enabled)
+        self.btn_refresh.setEnabled(enabled)
 
     def _update_stat(self, card: QWidget, value: str):
         val_lbl = card.findChild(QLabel, "statValue")

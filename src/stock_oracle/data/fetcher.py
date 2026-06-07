@@ -22,11 +22,11 @@ from ..logger import log
 class DataFetcher:
     def __init__(self, provider: Optional[DataProvider] = None):
         self.provider = provider or get_provider(config.get("data_provider", "composite"))
-        # 增加请求间隔，避免被限流
-        self.min_sleep = float(config.get("rate_limit_min_sec", 1.0))
-        self.max_sleep = float(config.get("rate_limit_max_sec", 2.0))
+        # 请求间隔，避免被限流（并发模式下使用较小值）
+        self.min_sleep = float(config.get("rate_limit_min_sec", 0.5))
+        self.max_sleep = float(config.get("rate_limit_max_sec", 1.5))
         self.history_days = int(config.get("kline_history_days", 500))
-        self.max_workers = 2  # 减少并发数，降低被限流风险
+        self.max_workers = 8  # 并发线程数
         self._cancel_flag = False
 
     # ---------------- 取消 ----------------
@@ -121,6 +121,16 @@ class DataFetcher:
             row = cur.fetchone()
         return row["d"] if row and row["d"] else None
 
+    def get_all_last_dates(self, adjust: str = "qfq") -> dict:
+        """批量查询所有股票的最后更新日期，用于快速判断哪些需要更新。"""
+        with db.cursor() as cur:
+            cur.execute(
+                "SELECT code, MAX(trade_date) as d FROM kline_daily WHERE adjust = ? GROUP BY code",
+                (adjust,),
+            )
+            rows = cur.fetchall()
+        return {row["code"]: row["d"] for row in rows}
+
     def _save_daily(self, code: str, df: pd.DataFrame, adjust: str = "qfq") -> int:
         if df.empty:
             return 0
@@ -174,7 +184,12 @@ class DataFetcher:
     def fetch_daily(self, code: str, force: bool = False,
                     progress: Optional[Callable[[str, int, int], None]] = None,
                     index_total: Tuple[int, int] = None) -> int:
-        """拉取单只股票日线，返回新增/更新的条数。"""
+        """拉取单只股票日线，返回新增/更新的条数。
+        
+        异常情况：
+        - 网络错误时会抛出异常，调用者可以重试
+        - 数据为空时返回 0（表示已是最新或无数据）
+        """
         if self._cancel_flag:
             return 0
 
@@ -196,12 +211,15 @@ class DataFetcher:
                         return 0
                 except Exception:
                     start_date = None
-        try:
-            df = self.provider.get_daily(code, start=start_date)
-        except Exception as e:
-            log.warning("拉取 %s 日线失败: %s", code, e)
-            return 0
-
+        
+        df = self.provider.get_daily(code, start=start_date)
+        
+        # 如果数据为空，可能是网络错误，需要检查
+        if df.empty and start_date is None:
+            # 第一次拉取就为空，可能是网络错误
+            # 抛出异常让调用者重试
+            raise Exception(f"获取 {code} 日线数据为空，可能是网络错误")
+        
         n = self._save_daily(code, df)
         time.sleep(random.uniform(self.min_sleep, self.max_sleep))
 

@@ -59,6 +59,9 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
     "rate_limit_min_sec": 0.3,
     "rate_limit_max_sec": 1.0,
     "kline_history_days": 500,
+    "ai_provider": "qwen",
+    "ai_api_key": "",
+    "ai_api_secret": "",
 }
 
 

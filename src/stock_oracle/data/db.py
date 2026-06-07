@@ -95,8 +95,12 @@ def get_connection() -> sqlite3.Connection:
     global _connection
     if _connection is None:
         path = _db_path()
-        _connection = sqlite3.connect(str(path), check_same_thread=False)
+        _connection = sqlite3.connect(str(path), check_same_thread=False, timeout=30)
         _connection.row_factory = sqlite3.Row
+        # 先设置忙等待超时（毫秒），遇到锁时等待而非立即报错
+        _connection.execute("PRAGMA busy_timeout=30000")
+        # 开启 WAL 模式，允许并发读写
+        _connection.execute("PRAGMA journal_mode=WAL")
     return _connection
 
 
