@@ -6,6 +6,20 @@
 """
 import argparse
 import sys
+import os
+
+lib_path = os.path.join(os.path.dirname(__file__), 'lib')
+if os.path.exists(lib_path):
+    sys.path.insert(0, lib_path)
+
+src_path = os.path.join(os.path.dirname(__file__), 'src')
+if os.path.exists(src_path):
+    sys.path.insert(0, src_path)
+
+import site
+user_site = site.getusersitepackages()
+if os.path.exists(user_site):
+    sys.path.insert(0, user_site)
 
 
 def main():
