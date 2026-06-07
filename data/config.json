@@ -1,0 +1,11 @@
+{
+  "data_provider": "sina",
+  "refresh_interval_sec": 5,
+  "enable_sound": false,
+  "sound_file": "",
+  "http_proxy": "",
+  "https_proxy": "",
+  "rate_limit_min_sec": 0.3,
+  "rate_limit_max_sec": 1.0,
+  "kline_history_days": 500
+}
